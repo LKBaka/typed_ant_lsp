@@ -1,6 +1,7 @@
 mod utils;
 
 use ant_ast::node::GetToken;
+use ant_crate_def::definition::Def;
 use ant_id::ModuleId;
 use ant_lexer::Lexer;
 use ant_name_resolver::NameResolver;
@@ -87,6 +88,7 @@ impl SemanticTokenTypeNumber {
 #[derive(Debug)]
 pub struct AnalysisResult {
     pub tcx: TypeContext,
+    pub defs: Vec<Def>,
     pub typed_stmts: Vec<TypedStatement>,
     pub typed_exprs: Vec<TypedExpression>,
     pub diagnostics: HashMap<Url, Vec<Diagnostic>>,
@@ -180,6 +182,7 @@ impl Backend {
 
                 return Arc::new(AnalysisResult {
                     tcx,
+                    defs: vec![],
                     typed_stmts: vec![],
                     typed_exprs: vec![],
                     diagnostics,
@@ -200,7 +203,7 @@ impl Backend {
         }
 
         let mut checker = TypeChecker::new(&mut module, &mut name_resolver);
-        if let Err(e) = checker.check_all(ast) {
+        if let Err(e) = checker.check_all(ast, None) {
             let target_url = Url::from_file_path(e.token.file.as_ref()).unwrap();
 
             diagnostics.entry(target_url).or_default().push(Diagnostic {
@@ -238,6 +241,7 @@ impl Backend {
         }
 
         Arc::new(AnalysisResult {
+            defs: name_resolver.krate.definitions.clone(),
             typed_stmts: module.typed_stmts,
             typed_exprs: module.typed_exprs,
             diagnostics,
@@ -353,10 +357,7 @@ impl LanguageServer for Backend {
                 }
             }
 
-            self.1
-                .write()
-                .await
-                .insert(uri, (change.text.clone(), res));
+            self.1.write().await.insert(uri, (change.text.clone(), res));
         }
     }
 
@@ -367,8 +368,9 @@ impl LanguageServer for Backend {
             None => return Ok(None),
         };
         let prefix = current_ident(text, params.text_document_position.position);
-        let table = res.tcx.table.lock().unwrap();
-        let items = table
+        let table = res.tcx.table.read().unwrap();
+
+        let mut completion_items: Vec<_> = table
             .var_map
             .iter()
             .filter(|(name, _)| name.starts_with(&prefix))
@@ -382,7 +384,40 @@ impl LanguageServer for Backend {
                 ..Default::default()
             })
             .collect();
-        Ok(Some(CompletionResponse::Array(items)))
+
+        let mut krate_completion_items = res
+            .defs
+            .iter()
+            .map(|it| (it.name(), it.ty()))
+            .filter_map(|(name, ty)| {
+                let Some(name) = name else {
+                    return None;
+                };
+
+                let Some(ty) = ty else {
+                    return Some(CompletionItem {
+                        label: name.to_string(),
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        ..Default::default()
+                    });
+                };
+
+                Some(CompletionItem {
+                    label: name.to_string(),
+                    kind: Some(match res.tcx.get(ty) {
+                        Ty::Function { .. } => CompletionItemKind::FUNCTION,
+                        Ty::Struct { .. } => CompletionItemKind::STRUCT,
+                        Ty::Enum { .. } => CompletionItemKind::ENUM,
+                        _ => CompletionItemKind::VARIABLE,
+                    }),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        completion_items.append(&mut krate_completion_items);
+
+        Ok(Some(CompletionResponse::Array(completion_items)))
     }
 
     async fn semantic_tokens_full(
