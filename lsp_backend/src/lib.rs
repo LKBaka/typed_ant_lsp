@@ -478,6 +478,30 @@ impl LanguageServer for Backend {
                         SemanticTokenTypeNumber::Struct,
                     ));
                 }
+                TypedExpression::StaticMemberAccess { left, right, .. } => {
+                    let left = &res.typed_exprs[left.0];
+                    let range = get_lsp_range(text, &left.token());
+                    intermediate.push((
+                        range.start,
+                        left.token().value.utf16_len() as u32,
+                        match res.tcx.get(left.get_type()) {
+                            Ty::Enum { .. } => SemanticTokenTypeNumber::Enum,
+                            Ty::Struct { .. } => SemanticTokenTypeNumber::Struct,
+                            _ => SemanticTokenTypeNumber::Struct,
+                        },
+                    ));
+
+                    let right_range = get_lsp_range(text, &right.token);
+                    intermediate.push((
+                        right_range.start,
+                        right.token.value.utf16_len() as u32,
+                        match res.tcx.get(left.get_type()) {
+                            Ty::Enum { .. } => SemanticTokenTypeNumber::EnumMember,
+                            Ty::Struct { .. } => SemanticTokenTypeNumber::Property,
+                            _ => SemanticTokenTypeNumber::Property,
+                        },
+                    ));
+                }
                 _ => {}
             }
         }
